@@ -14,6 +14,7 @@ import os
 import sys
 from pathlib2 import Path
 from wiki_loader import WikipediaDataSet
+from input_loader import InputDataSet
 import accuracy
 import numpy as np
 from termcolor import colored
@@ -184,6 +185,53 @@ def test(model, args, epoch, dataset, logger, threshold):
 
         return epoch_pk
 
+def output(model, args, epoch, dataset, logger, threshold):
+    model.eval()
+    with tqdm(desc='Testing', total=len(dataset)) as pbar:
+        acc = accuracy.Accuracy()
+        for i, (data, target, paths) in enumerate(dataset):
+            if True:
+                if i == args.stop_after:
+                    break
+                pbar.update()
+                output = model(data)
+                output_softmax = F.softmax(output, 1)
+                targets_var = Variable(maybe_cuda(torch.cat(target, 0), args.cuda), requires_grad=False)
+                output_seg = output.data.cpu().numpy().argmax(axis=1)
+                target_seg = targets_var.data.cpu().numpy()
+                preds_stats.add(output_seg, target_seg)
+
+                current_idx = 0
+
+                for k, t in enumerate(target):
+                    document_sentence_count = len(t)
+                    to_idx = int(current_idx + document_sentence_count)
+
+                    output = ((output_softmax.data.cpu().numpy()[current_idx: to_idx, :])[:, 1] > threshold)
+                    h = np.append(output, [1])
+                    tt = np.append(t, [1])
+
+                    acc.update(h, tt)
+
+                    current_idx = to_idx
+
+                    # acc.update(output_softmax.data.cpu().numpy(), target)
+
+            #
+            # except Exception as e:
+            #     # logger.info('Exception "%s" in batch %s', e, i)
+            #     logger.debug('Exception while handling batch with file paths: %s', paths, exc_info=True)
+
+        epoch_pk, epoch_windiff = acc.calc_accuracy()
+
+        logger.debug('Testing Epoch: {}, accuracy: {:.4}, Pk: {:.4}, Windiff: {:.4}, F1: {:.4} . '.format(epoch + 1,
+                                                                                                          preds_stats.get_accuracy(),
+                                                                                                          epoch_pk,
+                                                                                                          epoch_windiff,
+                                                                                                          preds_stats.get_f1()))
+        preds_stats.reset()
+
+        return epoch_pk
 
 def main(args):
     sys.path.append(str(Path(__file__).parent))
@@ -199,7 +247,7 @@ def main(args):
 
     configure(os.path.join('runs', args.expname))
 
-    if not args.test:
+    if not args.test or args.input:
         word2vec = gensim.models.KeyedVectors.load_word2vec_format(utils.config['word2vecfile'], binary=True)
     else:
         word2vec = None
@@ -209,7 +257,8 @@ def main(args):
             dataset_path = Path(utils.config['wikidataset'])
             train_dataset = WikipediaDataSet(dataset_path / 'train', word2vec=word2vec,
                                              high_granularity=args.high_granularity)
-            dev_dataset = WikipediaDataSet(dataset_path / 'dev', word2vec=word2vec, high_granularity=args.high_granularity)
+            dev_dataset = WikipediaDataSet(dataset_path / 'dev', word2vec=word2vec,
+                                           high_granularity=args.high_granularity)
             test_dataset = WikipediaDataSet(dataset_path / 'test', word2vec=word2vec,
                                             high_granularity=args.high_granularity)
 
@@ -226,6 +275,7 @@ def main(args):
         test_dl = DataLoader(test_dataset, batch_size=args.test_bs, collate_fn=collate_fn, shuffle=False,
                              num_workers=args.num_workers)
 
+
     assert bool(args.model) ^ bool(args.load_from)  # exactly one of them must be set
 
     if args.model:
@@ -238,7 +288,7 @@ def main(args):
     model = maybe_cuda(model)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-    if not args.infer:
+    if not (args.infer or args.input):
         best_val_pk = 1.0
         for j in range(args.epochs):
             train(model, args, j, train_dl, logger, optimizer)
@@ -255,6 +305,16 @@ def main(args):
                 best_val_pk = val_pk
                 with (checkpoint_path / 'best_model.t7'.format(j)).open('wb') as f:
                     torch.save(model, f)
+
+    elif args.input:
+        input_dataset = InputDataSet(args.input, word2vec=word2vec)
+
+        input_dl = DataLoader(input_dataset, batch_size=args.test_bs, collate_fn=collate_fn, shuffle=False,
+                             num_workers=args.num_workers)
+
+        output(model, args, 0, input_dl, logger, 0.4)
+
+
 
     else:
         test_dataset = WikipediaDataSet(args.infer, word2vec=word2vec,
@@ -281,5 +341,6 @@ if __name__ == '__main__':
     parser.add_argument('--num_workers', help='How many workers to use for data loading', type=int, default=0)
     parser.add_argument('--high_granularity', help='Use high granularity for wikipedia dataset segmentation', action='store_true')
     parser.add_argument('--infer', help='inference_dir', type=str)
+    parser.add_argument('--input', help='input_dir', type=str)
 
     main(parser.parse_args())
